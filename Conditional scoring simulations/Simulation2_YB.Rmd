@@ -1,0 +1,278 @@
+---
+title: "Conditional Scoring - Simulation 2 - correlated abilities and test saavy"
+output: html_notebook
+---
+
+In this I will attempt to create a computationaly efficient way to draw N theta values (standard normal), I item difficulties (standard normal) and discriminations (Gamma(2,2)). 
+See https://ben18785.shinyapps.io/distribution-zoo/ to explore Gamma (2,2) PDF and CDF.
+In the first phase I will assume that one item pair is locally dependent.
+
+I will compare two cases: 
+1. the first item measures one ability (theta1) and item two measures a second ability (theta2) normally distributed and highly correlated (r=.75 or so).
+2. both items measure the same ability
+
+Trying two flipping mechanisms:
+1. naive - fully deterministic.
+2. test-saavy based - draw a value [0,1] negatively correlated with ability, to simulate the test-savvy of students. If students are test-savvy, they are unlikely to follow the previous question in answering the current. Students incorrect on the first question will be tested for on their test-savvy, if they fail, we flip their answer to the second question.
+
+#Setup and basic variables
+```{r, echo=FALSE, warning=FALSE}
+library(tibble)
+library(psych)
+library(knitr)
+library(irtoys)
+library(boot)
+library(base)
+```
+
+
+#Drawing functions
+## Students abilities
+Creating a table of student ability with a correlated second ability (for one variation of the model) and a test-savvy characteristic correlated with the average of the two ability values (for another variation).
+```{r}
+draw_student_ability <- function(students = 1000, rho_ability=0.75, rho_savvy = 0.75) {
+  # First student ability
+  theta1<-rnorm(students) 
+  # Second student ability - correlated with first
+  theta2<-theta1*rho_ability+sqrt(1-rho_ability^2)*rnorm(students) 
+  # Test-savvy, negatively correlated with average student ability
+  savvy <-(theta1+theta2/2)*rho_savvy+sqrt(1-rho_savvy^2)*rnorm(students) 
+  savvy <- 1-inv.logit(savvy)
+  #creating tibble
+  theta <- cbind(theta1,theta2,savvy)
+  theta <- as.tibble(theta)
+  return(theta)
+}
+```
+
+## Item Characteristics
+Drawing item characteristics. difficulty is drawn from a standard normal distribution. Discrimination is drawn from a Gamma distribution with a shape of 2 and rate of 2. this means discrimination values are postive with a mean of 1, and the distribution is right-skewed which seemed more reasonable to me than other options.
+```{r}
+draw_item_characteristics <- function(items = 20) {
+  #item difficulty
+  difficulty <- rnorm(items)
+  #item discrimination - range [0,inf], mean 1.
+  discrimination <- rgamma(items,shape = 2, rate = 2)
+  # creating tibble
+  items <- cbind(difficulty,discrimination)
+  items <- as_tibble(items)
+  return(items)
+}
+```
+
+## Dichotomous response table
+```{r}
+Draw_dichot_table <- function(ability,item_diff,item_disc) {
+# a*theta-b/a
+dichot_table <- outer(ability,item_disc,FUN = "*")-(item_diff/item_disc)
+# creating table of same dimensions with random values drawn from unif[0,1]
+random <- matrix(rnorm(length(ability)*length(item_diff)), ncol=length(item_diff))
+# creating the dichotomous response table
+dichot_table <- random<inv.logit(dichot_table)
+# transforming from true/false to 0/1
+dichot_table <- 1*dichot_table
+return(dichot_table)
+}
+```
+
+# Introducing local dependence 
+
+## Naive flipping
+```{r}
+# Naive flipping means that all student who got the first question wrong, relied on that answer in answering question 2, which flipped their response to question 2. In this case two wrongs make a right.
+flip_column_naive <- function(Dichot, col) {
+   Dichot[Dichot[,1]==0,2] <- 1-Dichot[Dichot[,1]==0,2]
+   return(Dichot)
+}
+```
+
+## Correct response flipping
+```{r}
+# Correct response flipping is when a wrong first response + using the correct procedures to respond correctly to the second (meaning being right on the second) leads to a wrong answer. But two wrongs don't make a right.
+flip_column_correct_response <- function(Dichot, col) {
+  Dichot[Dichot[,1]==0 & Dichot[,2]==1,2] <- 1-Dichot[Dichot[,1]==0 & Dichot[,2]==1,2]
+   return(Dichot)
+}
+```
+
+## Test-savvy naive flipping
+
+```{r}
+# This variation assumes that each item has a characteristic that encapsulates the overall tendency of students to flip the item. It can be seen as a measure of how likely are students overall to rely on their previous answer due to the way the item is designed or phrased. In this case, we draw a value form a unif[0,1] distribution and see whether students are savvy enough not to rely on their previous response. If they are and the first response is wrong, then the second response is flipped.
+flip_column_test_savvy <- function(Dichot, col,savvy) {
+  flip <- runif(1)
+  Dichot[Dichot[,1]==0 & savvy<flip,2] <- 1-Dichot[Dichot[,1]==0 & savvy<flip,2]
+   return(Dichot)
+}
+
+```
+
+## Test-savvy correct response flipping
+
+```{r}
+# combines the previous two. flipped only if student is not test savvy, were wrong on first, and were right on second.
+flip_column_test_savvy_correct_response <- function(Dichot, col,savvy) {
+  flip <- runif(1)
+  Dichot[Dichot[,1]==0 & Dichot[,2]==1 & savvy<flip,2] <- 
+    1-Dichot[Dichot[,1]==0 & Dichot[,2]==1 & savvy<flip,2]
+   return(Dichot)
+}
+
+```
+
+# Conditional scoring
+
+## Weak condition - flipping back only incorrect responses
+```{r}
+# conditionally scoring incorrect second responses according to first response
+conditional_score_weak <- function(Dichot,dep_col) {
+    Dichot[Dichot[,dep_col-1]==0 & Dichot[,dep_col]==0,dep_col] <- 1
+    return(Dichot)
+}
+```
+
+## Weak condition - flipping back all responses
+```{r}
+# conditionally scoring all second responses according to first response
+conditional_score_strong <- function(Dichot,dep_col) {
+    Dichot[Dichot[,dep_col-1]==0 ,dep_col] <- 1 - Dichot[Dichot[,dep_col-1]==0 ,dep_col]
+    return(Dichot)
+}
+```
+
+
+#run simulation
+This simulaiton allows comparing 5 flipping conditions: independent (no flipping), naive, correct respose, test-savvy based naive flipping, test-savvy based correct resposne flipping.
+It will also compare 3 conditional scoring options: no condition, weak condition, strong condition.
+the result will be a 3X5 table of average alpha values over the number of runs defined.
+```{r}
+sims <- 100 #number of simulations
+dep_col <- c(2,8,15) #choose dependent columns
+alphas_no_conditional_scoring <- tibble(matrix(NA, nrow = 0, ncol = 5))
+alphas_weak_conditional_scoring <- tibble(matrix(NA, nrow = 0, ncol = 5))
+alphas_strong_conditional_scoring <- tibble(matrix(NA, nrow = 0, ncol = 5))
+
+# names(alphas_no_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+# names(alphas_weak_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+# names(alphas_strong_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+
+
+for (s in 1:sims) {
+##drawing new students, items, and responses
+  theta <- draw_student_ability()
+  items <- draw_item_characteristics()
+  Dichot <- Draw_dichot_table(theta$theta1,items$difficulty,items$discrimination)
+
+#duplicating dichot table for all conditions
+  Dichot_naive <- Dichot
+  Dichot_correct_response <- Dichot
+  Dichot_savvy <- Dichot
+  Dichot_savvy_correct <- Dichot
+  
+# flipping dependent columns
+for (i in dep_col) {
+  Dichot_naive <- flip_column_naive(Dichot_naive,i)
+  Dichot_correct_response <- flip_column_correct_response(Dichot_correct_response,i)
+  Dichot_savvy <- flip_column_test_savvy(Dichot_savvy,i,theta$savvy)
+  Dichot_savvy_correct <- flip_column_test_savvy_correct_response(Dichot_savvy,i,theta$savvy)
+}
+
+# Weak conditional scoring
+for (i in dep_col) {
+  Dichot_weak <- conditional_score_weak(Dichot,i)
+  Dichot_weak_naive <- conditional_score_weak(Dichot_naive,i)
+  Dichot_weak_correct_response <- conditional_score_weak(Dichot_correct_response,i)
+  Dichot_weak_savvy <- conditional_score_weak(Dichot_savvy,i)
+  Dichot_weak_savvy_correct <- conditional_score_weak(Dichot_savvy_correct,i)
+}
+  
+# Strong conditional scoring
+for (i in dep_col) {
+  Dichot_strong <- conditional_score_strong(Dichot,i)
+  Dichot_strong_naive <- conditional_score_strong(Dichot_naive,i)
+  Dichot_strong_correct_response <- conditional_score_strong(Dichot_correct_response,i)
+  Dichot_strong_savvy <- conditional_score_strong(Dichot_savvy,i)
+  Dichot_strong_savvy_correct <- conditional_score_strong(Dichot_savvy_correct,i)
+}
+
+
+# storing alpha values without conditional scoring
+independent <- psych::alpha(Dichot)
+independent <- as.numeric(independent$total[1])
+
+naive <- psych::alpha(Dichot_naive)
+naive <- as.numeric(naive$total[1])
+
+correct_response <- psych::alpha(Dichot_correct_response)
+correct_response <- as.numeric(correct_response$total[1])
+
+savvy <- psych::alpha(Dichot_savvy)
+savvy <- as.numeric(savvy$total[1])
+
+savvy_correct <- psych::alpha(Dichot_savvy_correct)
+savvy_correct <- as.numeric(savvy_correct$total[1])
+
+alphas <- c(independent,naive,correct_response,savvy,savvy_correct)
+alphas_no_conditional_scoring <- 
+  rbind(alphas_no_conditional_scoring, alphas)
+
+
+# storing alpha values with weak conditional scoring
+
+independent_weak <- psych::alpha(Dichot_weak)
+independent_weak <- as.numeric(independent_weak$total[1])
+
+naive_weak <- psych::alpha(Dichot_weak_naive)
+naive_weak <- as.numeric(naive_weak$total[1])
+
+correct_response_weak <- psych::alpha(Dichot_weak_correct_response)
+correct_response_weak <- as.numeric(correct_response_weak$total[1])
+
+savvy_weak <- psych::alpha(Dichot_weak_savvy)
+savvy_weak <- as.numeric(savvy_weak$total[1])
+
+savvy_correct_weak <- psych::alpha(Dichot_weak_savvy_correct)
+savvy_correct_weak <- as.numeric(savvy_correct_weak$total[1])
+
+alphas_weak <- 
+  c(independent_weak,naive_weak,correct_response_weak,savvy_weak,savvy_correct_weak)
+alphas_weak_conditional_scoring <- 
+  rbind(alphas_weak_conditional_scoring, alphas_weak)
+
+
+# storing alpha values with stong conditional scoring
+independent_strong <- psych::alpha(Dichot_strong)
+independent_strong <- as.numeric(independent_strong$total[1])
+
+naive_strong <- psych::alpha(Dichot_strong_naive)
+naive_strong <- as.numeric(naive_strong$total[1])
+
+correct_response_strong <- psych::alpha(Dichot_strong_correct_response)
+correct_response_strong <- as.numeric(correct_response_strong$total[1])
+
+savvy_strong <- psych::alpha(Dichot_strong_savvy)
+savvy_strong <- as.numeric(savvy_strong$total[1])
+
+savvy_correct_strong <- psych::alpha(Dichot_strong_savvy_correct)
+savvy_correct_strong <- as.numeric(savvy_correct_strong$total[1])
+
+alphas_strong <- 
+  c(independent_strong,naive_strong,correct_response_strong,savvy_strong,savvy_correct_strong)
+alphas_strong_conditional_scoring <- 
+  rbind(alphas_strong_conditional_scoring, alphas_strong)
+
+}
+names(alphas_no_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+
+names(alphas_weak_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+
+names(alphas_strong_conditional_scoring) <- c("independent","naive","correct_response","savvy","savvy_correct")
+
+results <- rbind(colMeans(alphas_no_conditional_scoring),
+                 colMeans(alphas_weak_conditional_scoring),
+                 colMeans(alphas_strong_conditional_scoring))
+rownames(results) <- c("no condition","weak condition","strong condition")
+
+results
+```
+

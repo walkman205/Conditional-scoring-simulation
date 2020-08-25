@@ -1,0 +1,232 @@
+---
+title: "Conditional Scoring First Simulation"
+output: html_notebook
+---
+
+This simulation will attempt to check whether conditionally scoring locally dependent true/false questions improves reliability in comparison to regular scoring. The steps of the simulation will include:
+1. drawing 20 difficulty values for items from a uniform distribution (-3,3). assuming all to have discrimination of 1 and guessing of 0 (1PL model).
+2. drawing 1000 student ability values from a standard normal distribution.
+3. using the IRT ICC for each question and each student to simulate the student answering (draw number from a uniform distribution (0,1), if it's lower than the ICCi(theta) then the answer is marked as correct).
+4. If the student was incorrect and it is the first of two dependent questions, then we 'flip' the score for the following item.
+5. We then compare the relibility for regular scoring with two conditional scoring rules:
+
+The strong rule - 
+
+The weak rule - 
+
+# Setup
+```{r}
+require(psych)
+require(knitr)
+
+
+# creating a function to simulate whether a student answered an item correctly based on the item diff and the student ability. Allowing for 1PL, 2PL, or 3PL model.
+correct_response <- function(student_theta, item_b_value, item_a_value=1.7, item_c_value=0) {
+  
+  Pcorrect <- item_c_value + (1-item_c_value)*
+    ((exp(item_a_value*(student_theta - item_b_value)))/
+       (1+ exp(item_a_value*(student_theta - item_b_value))))
+  
+  answer <- if (runif(1) <= Pcorrect) {
+  1} else {0}
+  
+  return(answer)
+}
+
+#Creating a function that takes a dichotomously scored table and a column number of a locally dependent item and flips the scores for that variable
+
+flip_score <- function(Dichot, second) {
+  first <- second-1
+  for (i in 1:length(Dichot[1])) {
+    if (Dichot[i,first]==0) {
+    Dichot[i,second] <- 1-Dichot[i,second]
+  } else {Dichot[i,second]}
+  }
+  return(Dichot)
+}
+
+condition_weak <- function(Dichot, second) {
+  first <- second-1
+  for (i in 1:length(Dichot[1])) {
+    if (Dichot[i,first]==0 & Dichot[i,second]==0) {
+      Dichot[i,second] <- 1
+    }else {Dichot[i,second]}
+    
+  }
+  return(Dichot)
+}
+
+condition_strong <- function(Dichot, second) {
+  first <- second-1
+  for (i in 1:length(Dichot[1])) {
+    if (Dichot[i,first]==0) {
+      Dichot[i,second] <- 1-Dichot[i,second]
+    }else {Dichot[i,second]}
+    
+  }
+  return(Dichot)
+}
+
+```
+
+#Drawing the variables
+```{r}
+item_diff <- runif(20,-3,3)
+theta <- rnorm(1000)
+```
+
+
+# Creating the dichotomous response table
+```{r}
+Dichot <- data.frame(matrix(NA, nrow=length(theta), ncol=length(item_diff)))
+
+# dichot table when all items are independent
+for (i in 1:length(theta)) {
+  for (j in 1:length(item_diff)) {
+    Dichot[i,j] <- correct_response(theta[i],item_diff[j])
+  }
+}
+
+Alpha <- psych::alpha(Dichot)
+Alpha <- as.numeric(Alpha$total[1])
+```
+
+
+# Inserting locally dependent items
+
+```{r}
+dependent_items <- c(2,6,10,11,15,20) # Item 1 cannot be dependent
+
+Dichot_dep <- Dichot
+
+# flipping scores for all locally dependent items
+for (i in dependent_items) {
+  Dichot_dep <- flip_score(Dichot_dep,i)
+  
+}
+
+#Alpha with dependencies
+Alpha_dep <- psych::alpha(Dichot_dep)
+Alpha_dep <- as.numeric(Alpha_dep$total[1])
+```
+
+
+# Conditional scoring - weak condition
+```{r}
+Dichot_cond_weak <- Dichot_dep
+
+for (i in dependent_items) {
+  Dichot_cond_weak <- condition_weak(Dichot_cond_weak,i)
+  
+}
+
+Alpha_cond_weak <- psych::alpha(Dichot_cond_weak)
+Alpha_cond_weak <- as.numeric(Alpha_cond_weak$total[1])
+
+
+```
+
+
+#Conditional scoring - strong condition
+```{r}
+Dichot_cond_strong <- Dichot_dep
+
+for (i in dependent_items) {
+  Dichot_cond_strong <- condition_strong(Dichot_cond_strong,i)
+  
+}
+
+Alpha_cond_strong <- psych::alpha(Dichot_cond_strong)
+Alpha_cond_strong <- as.numeric(Alpha_cond_strong$total[1])
+
+```
+
+
+# Display simulation results
+
+```{r}
+alpha_table <- as.tibble(t(c(Alpha,Alpha_dep,Alpha_cond_weak,Alpha_cond_strong)))
+names(alpha_table) <- c("independent","dependent","weak condition","strong condition")
+knitr::kable(alpha_table,"rst")
+
+```
+
+The strong condition seems to "fix" the local dependence (since it was created with a strong assumption) and therefore always has the same alpha value and the independent sample.
+Dependent test forms seem to always have lower reliability than independent test forms.
+
+The weak condition, however, is interesting since it sometimes improves reliability but at worse, has the same reliability as the weak condition.
+
+To really see these trends, I will run the simulation multiple times and look at the average alpha values for all runs.
+
+# Now do it s times for differnt "occasions" (same items, same students), it can take a long while, 500 runs took me about 10 minutes
+
+```{r}
+#Creating fixed values and empty df
+sims <- 100 #number of simulations
+item_diff <- runif(20,-3,3)
+theta <- rnorm(1000)
+dependent_items <- c(2,6,10,11,15,20) # arbitrarily chosen, item 1 cannot be dependent
+Alphas_occasions <- data.frame(matrix(NA, nrow=sims, ncol=4)) #collecting the alpha results from each round 
+
+for (s in 1:sims) {
+  
+  Dichot <- data.frame(matrix(NA, nrow=length(theta), ncol=length(item_diff)))
+
+# dichot table when all items are independent
+for (i in 1:length(theta)) {
+  for (j in 1:length(item_diff)) {
+    Dichot[i,j] <- correct_response(theta[i],item_diff[j])
+  }
+}
+
+Alpha <- psych::alpha(Dichot)
+Alpha <- as.numeric(Alpha$total[1])
+
+Dichot_dep <- Dichot
+
+# flipping scores for all locally dependent items
+for (i in dependent_items) {
+  Dichot_dep <- flip_score(Dichot_dep,i)
+  
+}
+
+#Alpha with dependencies
+Alpha_dep <- psych::alpha(Dichot_dep)
+Alpha_dep <- as.numeric(Alpha_dep$total[1])
+
+Dichot_cond_weak <- Dichot_dep
+
+for (i in dependent_items) {
+  Dichot_cond_weak <- condition_weak(Dichot_cond_weak,i)
+  
+}
+
+Alpha_cond_weak <- psych::alpha(Dichot_cond_weak)
+Alpha_cond_weak <- as.numeric(Alpha_cond_weak$total[1])
+Dichot_cond_strong <- Dichot_dep
+
+for (i in dependent_items) {
+  Dichot_cond_strong <- condition_strong(Dichot_cond_strong,i)
+  
+}
+
+Alpha_cond_strong <- psych::alpha(Dichot_cond_strong)
+Alpha_cond_strong <- as.numeric(Alpha_cond_strong$total[1])
+
+Alphas_occasions[s,] <- t(c(Alpha,Alpha_dep,Alpha_cond_weak,Alpha_cond_strong))
+}
+
+names(Alphas_occasions) <- c("independent","dependent","weak condition","strong condition")
+
+colMeans(Alphas_occasions)
+```
+First run of 500 simulations results in:
+
+independent        dependent      weak condition  strong condition 
+  0.7562680        0.7561136        0.7562170        0.7561727 
+
+it seems that the general trend is 
+
+r(dependent) <= r(strong_condition) <= r(weak_condition) <= r(independent)
+
+

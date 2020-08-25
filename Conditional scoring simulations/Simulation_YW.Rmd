@@ -1,0 +1,193 @@
+---
+title: "Conditional Scoring - Simulation 2 - correlated abilities and test saavy"
+output: html_notebook
+---
+
+In this I will attempt to create a computationaly efficient way to draw N theta values (standard normal), I item difficulties (standard normal) and discriminations (Gamma(2,2)). 
+See https://ben18785.shinyapps.io/distribution-zoo/ to explore Gamma (2,2) PDF and CDF.
+In the first phase I will assume that one item pair is locally dependent.
+
+I will compare two cases: 
+1. the first item measures one ability (theta1) and item two measures a second ability (theta2) normally distributed and highly correlated (r=.75 or so).
+2. both items measure the same ability
+
+Trying two flipping mechanisms:
+1. naive - fully deterministic.
+2. test-saavy based - draw a value [0,1] negatively correlated with ability, to simulate the test-savvy of students. If students are test-savvy, they are unlikely to follow the previous question in answering the current. Students incorrect on the first question will be tested for on their test-savvy, if they fail, we flip their answer to the second question.
+
+#Setup and basic variables
+```{r, echo=FALSE, warning=FALSE}
+library(tibble)
+library(psych)
+library(knitr)
+library(irtoys)
+library(boot)
+library(base)
+```
+
+
+#Drawing functions
+## Students abilities
+Creating a table of student ability with a correlated second ability (for one variation of the model) and a test-savvy characteristic correlated with the average of the two ability values (for another variation).
+```{r}
+
+
+inv.logit <- sigmoid <- function(z) {
+	1/(1+exp(-z))
+}
+
+logistic2pl.vec <- function(sk, d, a) {
+        ### uses vectors and returns matrix
+	smat = matrix(rep(sk,length(d)),nrow=length(sk))
+	dmat = matrix(rep(d,length(sk)),nrow=length(sk),byrow=T)
+	amat = matrix(rep(a,length(sk)),nrow=length(sk),byrow=T)	
+	sigmoid(amat * (smat - dmat))
+}
+
+
+draw_student_ability <- function(students = 10, rho_ability=0.75) {
+  # Student ability - Math ability
+  theta1 <- rnorm(students) 
+  # Avoiding misconcept, correlated with first
+  theta2 <- theta1*rho_ability+sqrt(1-rho_ability^2)*rnorm(students)
+  #creating tibble
+  theta <- cbind(theta1,theta2)
+  theta <- as_tibble(theta)
+  return(theta)
+}
+```
+
+## Item Characteristics
+Drawing item characteristics. difficulty is drawn from a standard normal distribution. Discrimination is drawn from a Gamma distribution with a shape of 2 and rate of 2. this means discrimination values are postive with a mean of 1, and the distribution is right-skewed which seemed more reasonable to me than other options.
+```{r}
+draw_item_characteristics <- function(items = 20) {
+  #item difficulty
+  difficulty <- rnorm(items)
+  #item discrimination - range [0,inf], mean 1.
+  discrimination <- rgamma(items,shape = 2, rate = 2)
+  # creating tibble
+  items <- cbind(difficulty,discrimination)
+  items <- as_tibble(items)
+  return(items)
+}
+```
+
+## Dichotomous response table
+
+```{r}
+## THIS FUNCTION HAD A LOT OF ISSUES
+# simulate data from an IRT model, uni-dimensional
+Draw_dichot_table <- function(ability,item_diff,item_disc) {
+  nitems <- length(item_diff)
+  nstudents <- length(ability)
+  # a*theta-b/a  OR a*(theta-b) ## THIS LOOKS WRONG
+  probability_matrix <- inv.logit(outer(ability,item_disc,FUN = "*")-(item_diff*item_disc))
+  # creating table of same dimensions with random values drawn from unif[0,1]
+ ## THIS IS WRONG random <- matrix(rnorm(length(ability)*length(item_diff)), ncol=length(item_diff))
+  
+  # creating the dichotomous response table
+  dichot_table <- (runif(nitems*nstudents) < probability_matrix) + 0
+  return(dichot_table)
+}
+
+## I think misconcept chance should also related with diff and disc, but misconcept chance should be less than incorrect, so add 20% to the probability matrix. 
+Draw_misconcept_table <- function(misconcept,item_diff,item_disc) {
+  nitems <- length(item_diff)
+  nstudents <- length(ability)
+  # a*theta-b/a  OR a*(theta-b) ## THIS LOOKS WRONG
+  probability_matrix <- inv.logit(outer(misconcept,item_disc,FUN = "*")-(item_diff*item_disc))
+  # creating table of same dimensions with random values drawn from unif[0,1]
+ ## THIS IS WRONG random <- matrix(rnorm(length(ability)*length(item_diff)), ncol=length(item_diff))
+  
+  # creating the dichotomous response table
+  misconcept_table <- (runif(nitems*nstudents) < (probability_matrix+0.15)) + 0
+  return(misconcept_table)
+}
+
+Decrease_misconcept_table <- function(ability,misconcept_result,item_diff,item_disc) {
+  nitems <- length(item_diff)
+  nstudents <- length(ability)
+  # a*theta-b/a  OR a*(theta-b) ## THIS LOOKS WRONG
+  probability_matrix <- inv.logit(outer(ability,item_disc,FUN = "*")-(item_diff*item_disc))
+  # creating table of same dimensions with random values drawn from unif[0,1]
+ ## THIS IS WRONG random <- matrix(rnorm(length(ability)*length(item_diff)), ncol=length(item_diff))
+  
+  # creating the dichotomous response table
+  correct_table <- (runif(nitems*nstudents) < (probability_matrix+0.2*(misconcept_result-1))) + 0
+  misconcept_table <- (runif(nitems*nstudents) < probability_matrix) + 0
+  return(misconcept_table + correct_table)
+}
+
+Absolute_misconcept_table <- function(ability,misconcept_result,item_diff,item_disc) {
+  nitems <- length(item_diff)
+  nstudents <- length(ability)
+  # a*theta-b/a  OR a*(theta-b) ## THIS LOOKS WRONG
+  probability_matrix <- inv.logit(outer(ability,item_disc,FUN = "*")-(item_diff*item_disc))
+  # creating table of same dimensions with random values drawn from unif[0,1]
+ ## THIS IS WRONG random <- matrix(rnorm(length(ability)*length(item_diff)), ncol=length(item_diff))
+  
+  # creating the dichotomous response table
+  correct_table <- (runif(nitems*nstudents) < (probability_matrix+misconcept_result-1)) + 0
+  misconcept_table <- (runif(nitems*nstudents) < probability_matrix) + 0
+  return(misconcept_table + correct_table)
+}
+```
+
+## Get results for use
+
+```{r}
+students = 20
+ability <- draw_student_ability(students = 20,0.75)
+item1 <- draw_item_characteristics(1)
+#we can also try random misconcept
+#here 40% students would have misconcept
+random_misconcept <- (runif(students) < 0.4) + 0
+#misconcept happens to q1
+question1_misconcept <- Draw_misconcept_table(ability$theta2,item1$difficulty,item1$discrimination)
+#ability of q1
+question1_ability <- Draw_dichot_table(ability$theta1,item1$difficulty,item1$discrimination)
+#decrease certain amount probability if misconcept happens
+question1_decrease <- Decrease_misconcept_table(ability$theta1,question1_misconcept,item1$difficulty,item1$discrimination)
+#if misconcept happens, answer is wrong
+question1_absolute <- Absolute_misconcept_table(ability$theta1,question1_misconcept,item1$difficulty,item1$discrimination)
+
+item2 <- draw_item_characteristics(1)
+question2_misconcept <- Draw_misconcept_table(ability$theta2,item2$difficulty,item2$discrimination)
+question2_ability <- Draw_dichot_table(ability$theta1,item2$difficulty,item2$discrimination)
+question2_decrease <- Decrease_misconcept_table(ability$theta1,question1_misconcept,item2$difficulty,item2$discrimination)
+#if misconcept happens, answer is wrong
+question2_absolute <- Absolute_misconcept_table(ability$theta1,question2_misconcept,item2$difficulty,item2$discrimination)
+```
+
+## First Model
+
+# Misconcept happens on both questions or neither. If misconcept happens, probability of correct reduced by certain amount.
+# 0-wrong answer, 1-wrong because of misconcept, 2-correct
+
+```{r}
+model1 <- cbind(question1_decrease,question2_decrease)
+```
+
+## Second Model
+
+# Misconcept happens on both questions or neither. If misconcept happens, the answer would be wrong.
+
+
+```{r}
+model2 <- cbind(question1_absolute,question2_absolute)
+```
+
+
+## Third Model
+
+# If misconcept happens on question, question is wrong. Otherwise, look at ability.
+# If misconcept happens on question1, 90% chance happens to question2. If not, 10% chance for question2.
+
+```{r}
+change_happen <- (runif(students) < 0.1) + 0
+misconcept <- cbind(question1_misconcept,change_happen)
+misconcept[misconcept[,2]==1,1] <- 1-misconcept[misconcept[,2]==1,1]
+question2_absolute <- Absolute_misconcept_table(ability$theta1,misconcept[,1],item2$difficulty,item2$discrimination)
+model3 <- cbind(question1_absolute,question2_absolute)
+```
+
