@@ -156,7 +156,7 @@ question2_misconcept <- Draw_misconcept_table(ability$theta2,item2$difficulty,it
 question2_ability <- Draw_dichot_table(ability$theta1,item2$difficulty,item2$discrimination)
 question2_decrease <- Decrease_misconcept_table(ability$theta1,question1_misconcept,item2$difficulty,item2$discrimination)
 #if misconcept happens, answer is wrong
-question2_absolute <- Absolute_misconcept_table(ability$theta1,question2_misconcept,item2$difficulty,item2$discrimination)
+question2_absolute <- Absolute_misconcept_table(ability$theta1,question1_misconcept,item2$difficulty,item2$discrimination)
 ```
 
 ## First Model
@@ -190,4 +190,16 @@ misconcept[misconcept[,2]==1,1] <- 1-misconcept[misconcept[,2]==1,1]
 question2_absolute <- Absolute_misconcept_table(ability$theta1,misconcept[,1],item2$difficulty,item2$discrimination)
 model3 <- cbind(question1_absolute,question2_absolute)
 ```
+
+## Fourth/Fifth Model
+
+#misconcept chance is independent, 4th: misconcept decrease certain probability, 5th: misconcept leads to wrong result
+
+```{r}
+question2_decrease <- Decrease_misconcept_table(ability$theta1,question2_misconcept,item2$difficulty,item2$discrimination)
+question2_absolute <- Absolute_misconcept_table(ability$theta1,question2_misconcept,item2$difficulty,item2$discrimination)
+model4 <- cbind(question1_decrease,question2_decrease)
+model5 <- cbind(question1_absolute,question2_absolute)
+```
+
 
